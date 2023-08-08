@@ -10,7 +10,7 @@ nobs = 8  # 格子点数
 # 時間
 dt = 0.5  # 計算間隔[s]
 nt = 1200  # 計算ステップ数
-output_interval = 15  # 出力ステップ間隔
+output_interval = 15  # 出力間隔
 dt_out = dt * output_interval  # 出力間隔[s]
 nt_out = nt // output_interval + 1  # 出力ステップ数
 
@@ -23,7 +23,7 @@ def forward(x: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
         x: C with shape of (ens, tt, nx)
         w: w with shape of (nx,)
     return
-        y: C with shape of (ens, nt, nx)
+        y: C with shape of (ens, tt, nx)
     """
     u0 = 2.0  # 移流速度(定数)
     xnu = 5.0  # 拡散係数
@@ -82,52 +82,55 @@ def observation_true(x: torch.Tensor) -> torch.Tensor:
     return y_model + noise
 
 
-def run_free() -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
+def run() -> (
+    Tuple[
+        List[torch.Tensor],
+        List[torch.Tensor],
+        List[torch.Tensor],
+        List[torch.Tensor],
+        List[torch.Tensor],
+    ]
+):
     """
     model free run
     output
         list of C with shape of (nens, nx)
         list of w with shape of (nx,)
     """
-    x_free = torch.zeros((1, tt, nx))
-    x_free_list = []
-    w_free_list = []
-    q_free = torch.zeros((1,))  # no noise
-    for step in range(nt + 1):
-        w_free = forcing(step, q_free)
-        x_free = forward(x_free, w_free)
-        if step % output_interval == 0:
-            x_free_list.append(x_free[:, 1, :])
-            w_free_list.append(w_free)
-    return x_free_list, w_free_list
 
-
-def run_true() -> (
-    Tuple[List[torch.Tensor], List[torch.Tensor], List[torch.Tensor] | None]
-):
-    """
-    create true data
-    """
     x_true = torch.zeros((1, tt, nx))
     q_true = torch.normal(mean=0, std=1, size=(1,))
     x_true_list = []
     w_true_list = []
     y_list = []
+
+    x_free = torch.zeros((1, tt, nx))
+    x_free_list = []
+    w_free_list = []
+    q_free = torch.zeros((1,))  # no noise
+
     for step in range(nt + 1):
         w_true = forcing(step, q_true)
         x_true = forward(x_true, w_true)
         q_true = 0.8 * q_true + 0.2 * torch.normal(
             mean=0, std=1, size=(1,)
         )  # AR(1) model
+
+        w_free = forcing(step, q_free)
+        x_free = forward(x_free, w_free)
+
+        assim_interval = 15  # 同化間隔
+        assim_start = 375  # 同化開始ステップ
+        if step % assim_interval == 0 and step >= assim_start:
+            y = observation_true(x_true)
+            y_list.append(y)
+
         if step % output_interval == 0:
             x_true_list.append(x_true[:, 1, :])
             w_true_list.append(w_true)
-            if step >= 375:
-                y = observation_true(x_true)
-                y_list.append(y)
-            else:
-                y_list.append(None)
-    return x_true_list, w_true_list, y_list
+            x_free_list.append(x_free[:, 1, :])
+            w_free_list.append(w_free)
+    return x_true_list, w_true_list, y_list, x_free_list, w_free_list
 
 
 def plot_xt(x_list: List[torch.Tensor], ens: int, levels: torch.Tensor) -> None:
