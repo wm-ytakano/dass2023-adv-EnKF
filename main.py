@@ -19,26 +19,28 @@ assim_start = 375  # 同化開始ステップ
 tt = 2  # 予報変数の時間次元 (leap-flogのため2時刻必要)
 
 
-def forward(x: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
+def forward(x: torch.Tensor, w: torch.Tensor, scheme: int) -> torch.Tensor:
     """
     input
         x: C with shape of (ens, tt, nx)
         w: w with shape of (nx,)
+        scheme: leap frog=0 Euler=1
     return
         y: C with shape of (ens, tt, nx)
     """
+    t = scheme
     u0 = 2.0  # 移流速度(定数)
     xnu = 5.0  # 拡散係数
     Cn = x[:, 1, :].roll(shifts=-1, dims=-1)
     Cp = x[:, 1, :].roll(shifts=1, dims=-1)
     A = -u0 * (Cn - Cp) / (2 * dx)
-    Cn = x[:, 0, :].roll(shifts=-1, dims=-1)
-    Cc = x[:, 0, :]
-    Cp = x[:, 0, :].roll(shifts=1, dims=-1)
+    Cn = x[:, t, :].roll(shifts=-1, dims=-1)
+    Cc = x[:, t, :]
+    Cp = x[:, t, :].roll(shifts=1, dims=-1)
     S = xnu * (Cn - 2 * Cc + Cp) / (dx * dx)
     x_next = torch.empty(x.shape)
     x_next[:, 0, :] = x[:, 1, :]
-    x_next[:, 1, :] = x[:, 0, :] + 2 * dt * (A + S + w.unsqueeze(0))
+    x_next[:, 1, :] = x[:, t, :] + 2 * dt * (A + S + w.unsqueeze(0))
     return x_next
 
 
@@ -113,15 +115,19 @@ def run() -> (
     w_asim_list = []
 
     for step in range(nt + 1):
+        if step % 15 == 0:
+            scheme = 1  # Euler
+        else:
+            scheme = 0  # leap frog
         w_true = forcing(step, q_true)
-        x_true = forward(x_true, w_true)
+        x_true = forward(x_true, w_true, scheme)
         q_true = 0.8 * q_true + 0.2 * torch.normal(mean=0, std=1, size=(1,))
 
         w_free = forcing(step, q_free)
-        x_free = forward(x_free, w_free)
+        x_free = forward(x_free, w_free, scheme)
 
         w_asim = forcing(step, q_asim)
-        x_asim = forward(x_asim, w_asim)
+        x_asim = forward(x_asim, w_asim, scheme)
         q_asim = 0.8 * q_asim + 0.2 * torch.normal(mean=0, std=1, size=(nens,))
 
         if step % assim_interval == 0 and step >= assim_start:
