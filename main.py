@@ -40,45 +40,22 @@ def forward(x: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
     return x_next
 
 
-def forcing_model(step: int) -> torch.Tensor:
+def forcing(step: int, q: torch.Tensor) -> torch.Tensor:
     """
     input
         step: time step
+        q: noise with shape of (nens,)
     return
-        modeled forcing with shape of (nx,)
+        modeled forcing with shape of (nens, nx)
     """
     F0 = 1.0  # 強制項の振幅
     index = torch.arange(nx)
+    nens = q.shape[0]
     index[6:] = 0
     k = torch.tensor(step, dtype=torch.float)
-    return (
-        F0
-        * torch.sin(2 * torch.pi * k * dt / 120)
-        * torch.sin(torch.pi * index * dx / 60)
-    )
-
-
-def forcing_true(step: int, q_prev: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-    """
-    input
-        step: time step
-        AR(1) noise with shape of (1,)
-    return
-        true forcing with shape of (nx,)
-        AR(1) noise with shape of (1,)
-    """
-    F0 = 1.0  # 強制項の振幅
-    index = torch.arange(nx)
-    index[6:] = 0
-    k = torch.tensor(step, dtype=torch.float)
-    q_add = torch.normal(mean=0.0, std=1.0, size=(1,))
-    q = 0.8 * q_prev + 0.2 * q_add  # add random noise
-    F = (
-        F0
-        * (torch.sin(2 * torch.pi * k * dt / 120) + q)
-        * torch.sin(torch.pi * index * dx / 60)
-    )
-    return F, q
+    tmp_f = torch.ones((nens, nx)) * torch.sin(2 * torch.pi * k * dt / 120)
+    tmp_q = q.unsqueeze(1)
+    return F0 * (tmp_f + tmp_q) * torch.sin(torch.pi * index * dx / 60)
 
 
 def observation_model(x: torch.Tensor) -> torch.Tensor:
@@ -115,8 +92,9 @@ def run_free() -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
     x_free = torch.zeros((1, tt, nx))
     x_free_list = []
     w_free_list = []
+    q_free = torch.zeros((1,))  # no noise
     for step in range(nt + 1):
-        w_free = forcing_model(step)
+        w_free = forcing(step, q_free)
         x_free = forward(x_free, w_free)
         if step % output_interval == 0:
             x_free_list.append(x_free[:, 1, :])
@@ -130,15 +108,17 @@ def run_true() -> (
     """
     create true data
     """
-    nens = 1
-    x_true = torch.zeros((nens, tt, nx))
-    q = torch.zeros((1,))  # noise of forcing
+    x_true = torch.zeros((1, tt, nx))
+    q_true = torch.normal(mean=0, std=1, size=(1,))
     x_true_list = []
     w_true_list = []
     y_list = []
     for step in range(nt + 1):
-        w_true, q = forcing_true(step, q)
+        w_true = forcing(step, q_true)
         x_true = forward(x_true, w_true)
+        q_true = 0.8 * q_true + 0.2 * torch.normal(
+            mean=0, std=1, size=(1,)
+        )  # AR(1) model
         if step % output_interval == 0:
             x_true_list.append(x_true[:, 1, :])
             w_true_list.append(w_true)
@@ -150,7 +130,7 @@ def run_true() -> (
     return x_true_list, w_true_list, y_list
 
 
-def plot_x(x_list: List[torch.Tensor], ens: int) -> None:
+def plot_xt(x_list: List[torch.Tensor], ens: int, levels: torch.Tensor) -> None:
     """
     plot data
     input:
@@ -164,32 +144,7 @@ def plot_x(x_list: List[torch.Tensor], ens: int) -> None:
         t_axis,
         torch.stack(x_list)[:, ens, :],
         cmap="RdBu_r",
-        levels=torch.arange(-20, 20, 2),
-        extend="both",
-    )
-    fig.colorbar(mappable)
-    ax.set_xlabel("x [m]")
-    ax.set_ylabel("t [s]")
-    ax.set_xlim([0, 400])
-    ax.set_ylim([600, 0])
-    plt.show()
-
-
-def plot_w(w_list: List[torch.Tensor]) -> None:
-    """
-    plot forcing
-    input:
-        List of torch.Tensor with shape of (nx) (length of nt_out)
-    """
-    x_axis = torch.arange(0, dx * nx, dx)
-    t_axis = torch.arange(0, dt_out * nt_out, dt_out)
-    fig, ax = plt.subplots()
-    mappable = ax.contourf(
-        x_axis,
-        t_axis,
-        torch.stack(w_list),
-        cmap="RdBu_r",
-        levels=torch.arange(-2, 2, 0.2),
+        levels=levels,
         extend="both",
     )
     fig.colorbar(mappable)
