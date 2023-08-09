@@ -30,14 +30,14 @@ def forward(x: torch.Tensor, w: torch.Tensor, scheme: int) -> torch.Tensor:
     t = scheme
     u0 = 2.0  # 移流速度(定数)
     xnu = 5.0  # 拡散係数
-    Cn = x[:, -1, :].roll(shifts=-1, dims=-1)
-    Cp = x[:, -1, :].roll(shifts=1, dims=-1)
+    Cn = torch.cat((x[:, -1, 1:], x[:, -1, :1]), dim=-1)
+    Cp = torch.cat((x[:, -1, -1:], x[:, -1, :-1]), dim=-1)
     A = -u0 * (Cn - Cp) / (2 * dx)
-    Cn = x[:, t, :].roll(shifts=-1, dims=-1)
+    Cn = torch.cat((x[:, t, 1:], x[:, t, :1]), dim=-1)
     Cc = x[:, t, :]
-    Cp = x[:, t, :].roll(shifts=1, dims=-1)
+    Cp = torch.cat((x[:, t, -1:], x[:, t, :-1]), dim=-1)
     S = xnu * (Cn - 2 * Cc + Cp) / (dx * dx)
-    x_next = torch.empty(x.shape)
+    x_next = torch.empty(x.shape, device=x.device)
     x_next[:, 0:-1, :] = x[:, 1:, :]
     x_next[:, -1, :] = x[:, t, :] + 2 * dt * (A + S + w.unsqueeze(0))
     return x_next
@@ -52,11 +52,13 @@ def forcing(step: int, q: torch.Tensor) -> torch.Tensor:
         modeled forcing with shape of (nens, nx)
     """
     F0 = 1.0  # 強制項の振幅
-    index = torch.arange(nx)
+    index = torch.arange(nx, device=q.device)
     nens = q.shape[0]
     index[6:] = 0
-    k = torch.tensor(step, dtype=torch.float)
-    tmp_f = torch.ones((nens, nx)) * torch.sin(2 * torch.pi * k * dt / 120)
+    k = torch.tensor(step, dtype=torch.float, device=q.device)
+    tmp_f = torch.ones((nens, nx), device=q.device) * torch.sin(
+        2 * torch.pi * k * dt / 120
+    )
     tmp_q = q.unsqueeze(1)
     return F0 * (tmp_f + tmp_q) * torch.sin(torch.pi * index * dx / 60)
 
@@ -81,43 +83,39 @@ def observation_true(x: torch.Tensor) -> torch.Tensor:
         y with shape of (nens, ny)
     """
     y_model = observation_model(x)  # (nens, ny)
-    noise = torch.normal(mean=0.0, std=8.0, size=y_model.shape)
+    noise = torch.normal(mean=0.0, std=8.0, size=y_model.shape, device=x.device)
     return y_model + noise
 
 
-def run() -> (
-    Tuple[
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor,
-    ]
-):
-    """
-    input:
-        nlag: 予報変数の時間次元 (leap-flogのため2時刻以上、固定ラグスムーザーの場合は長くする)
-    """
-    x_true = torch.zeros((1, 2, nx))
-    q_true = torch.normal(mean=0, std=1, size=(1,))
-    x_true_save = torch.zeros((nt, nx))
+def run(
+    device: torch.device,
+) -> Tuple[
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+]:
+    x_true = torch.zeros((1, 2, nx), device=device)
+    q_true = torch.normal(mean=0, std=1, size=(1,), device=device)
+    x_true_save = torch.zeros((nt, nx), device=device)
 
-    x_free = torch.zeros((1, 2, nx))
-    q_free = torch.zeros((1,))  # no noise
-    x_free_save = torch.zeros((nt, nx))
+    x_free = torch.zeros((1, 2, nx), device=device)
+    q_free = torch.zeros((1,), device=device)  # no noise
+    x_free_save = torch.zeros((nt, nx), device=device)
 
     nens = 100
-    x_filter = torch.zeros((nens, 2, nx))
-    q_filter = torch.normal(mean=0, std=1, size=(nens,))
-    x_filter_save = torch.zeros((nt, nx))
-    std_filter_save = torch.zeros((nt, nx))
+    x_filter = torch.zeros((nens, 2, nx), device=device)
+    q_filter = torch.normal(mean=0, std=1, size=(nens,), device=device)
+    x_filter_save = torch.zeros((nt, nx), device=device)
+    std_filter_save = torch.zeros((nt, nx), device=device)
 
     nlag = 300
-    x_smoother = torch.zeros((nens, nlag, nx))
-    q_smoother = torch.normal(mean=0, std=1, size=(nens,))
-    x_smoother_save = torch.zeros((nt, nx))
-    std_smoother_save = torch.zeros((nt, nx))
+    x_smoother = torch.zeros((nens, nlag, nx), device=device)
+    q_smoother = torch.normal(mean=0, std=1, size=(nens,), device=device)
+    x_smoother_save = torch.zeros((nt, nx), device=device)
+    std_smoother_save = torch.zeros((nt, nx), device=device)
 
     for step in range(nt + 1):
         if step % 15 == 0:
@@ -126,18 +124,24 @@ def run() -> (
             scheme = -2  # leap frog
         w_true = forcing(step, q_true)
         x_true = forward(x_true, w_true, scheme)
-        q_true = 0.8 * q_true + 0.2 * torch.normal(mean=0, std=1, size=(1,))
+        q_true = 0.8 * q_true + 0.2 * torch.normal(
+            mean=0, std=1, size=(1,), device=device
+        )
 
         w_free = forcing(step, q_free)
         x_free = forward(x_free, w_free, scheme)
 
         w_filter = forcing(step, q_filter)
         x_filter = forward(x_filter, w_filter, scheme)
-        q_filter = 0.8 * q_filter + 0.2 * torch.normal(mean=0, std=1, size=(nens,))
+        q_filter = 0.8 * q_filter + 0.2 * torch.normal(
+            mean=0, std=1, size=(nens,), device=device
+        )
 
         w_smoother = forcing(step, q_smoother)
         x_smoother = forward(x_smoother, w_smoother, scheme)
-        q_smoother = 0.8 * q_smoother + 0.2 * torch.normal(mean=0, std=1, size=(nens,))
+        q_smoother = 0.8 * q_smoother + 0.2 * torch.normal(
+            mean=0, std=1, size=(nens,), device=device
+        )
 
         if step % assim_interval == 0 and step >= assim_start:
             y = observation_true(x_true)  # (1, ny)
@@ -176,7 +180,7 @@ def EnKF(x_f: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
     x_mean = x_f.mean(dim=0).unsqueeze(0)  # (1, nlag, nx)
     delta_X = x_f - x_mean  # (nens, nlag, nx)
     delta_Y = observation_model(delta_X)  # (nens, ny)
-    R = torch.diag(torch.full((ny,), 8.0**2))  # (ny, ny)
+    R = torch.diag(torch.full((ny,), 8.0**2, device=x_f.device))  # (ny, ny)
     R2 = torch.matmul(delta_Y.t(), delta_Y) + (nens - 1) * R  # (ny, ny)
     K = torch.einsum(
         "ij,jkl->ikl",
@@ -188,7 +192,7 @@ def EnKF(x_f: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
     )  # (ny, nlag, nx)
     Hx = observation_model(x_f)  # (nens, ny)
     # Perturbed observations method
-    y_eps = torch.normal(mean=0.0, std=8.0, size=(nens, ny))
+    y_eps = torch.normal(mean=0.0, std=8.0, size=(nens, ny), device=x_f.device)
     y_inov = y + y_eps - Hx  # (nens, ny)
     increment = torch.einsum("ij,jkl->ikl", y_inov, K)  # (nens, nlag, nx)
     return increment
