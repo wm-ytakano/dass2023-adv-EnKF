@@ -98,7 +98,7 @@ def run() -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     q_free = torch.zeros((1,))  # no noise
     x_free_save = torch.zeros((nt, nx))
 
-    nens = 20
+    nens = 100
     x_filter = torch.zeros((nens, 2, nx))
     q_filter = torch.normal(mean=0, std=1, size=(nens,))
     x_filter_save = torch.zeros((nt, nx))
