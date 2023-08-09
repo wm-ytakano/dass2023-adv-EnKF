@@ -16,31 +16,30 @@ dt_out = dt * output_interval  # 出力間隔[s]
 nt_out = nt // output_interval + 1  # 出力ステップ数
 assim_interval = 15  # 同化間隔
 assim_start = 375  # 同化開始ステップ
-tt = 2  # 予報変数の時間次元 (leap-flogのため2時刻必要)
 
 
 def forward(x: torch.Tensor, w: torch.Tensor, scheme: int) -> torch.Tensor:
     """
     input
-        x: C with shape of (ens, tt, nx)
+        x: C with shape of (nens, nlag, nx)
         w: w with shape of (nx,)
-        scheme: leap frog=0 Euler=1
+        scheme: leap-frog=-2 Euler=-1
     return
-        y: C with shape of (ens, tt, nx)
+        y: C with shape of (nens, nlag, nx)
     """
     t = scheme
     u0 = 2.0  # 移流速度(定数)
     xnu = 5.0  # 拡散係数
-    Cn = x[:, 1, :].roll(shifts=-1, dims=-1)
-    Cp = x[:, 1, :].roll(shifts=1, dims=-1)
+    Cn = x[:, -1, :].roll(shifts=-1, dims=-1)
+    Cp = x[:, -1, :].roll(shifts=1, dims=-1)
     A = -u0 * (Cn - Cp) / (2 * dx)
     Cn = x[:, t, :].roll(shifts=-1, dims=-1)
     Cc = x[:, t, :]
     Cp = x[:, t, :].roll(shifts=1, dims=-1)
     S = xnu * (Cn - 2 * Cc + Cp) / (dx * dx)
     x_next = torch.empty(x.shape)
-    x_next[:, 0, :] = x[:, 1, :]
-    x_next[:, 1, :] = x[:, t, :] + 2 * dt * (A + S + w.unsqueeze(0))
+    x_next[:, 0:-1, :] = x[:, 1:, :]
+    x_next[:, -1, :] = x[:, t, :] + 2 * dt * (A + S + w.unsqueeze(0))
     return x_next
 
 
@@ -66,59 +65,63 @@ def observation_model(x: torch.Tensor) -> torch.Tensor:
     """
     modeled observation oparator
     input
-        x: C with shape of (nens, nx)
+        x: C with shape of (nens, nlag, nx)
     output:
         y with shape of (nens, ny)
     """
-    return x[:, 16:31:2]
+    return x[:, -1, 16:31:2]
 
 
 def observation_true(x: torch.Tensor) -> torch.Tensor:
     """
     true observation oparator
     input
-        x: C with shape of (nens, nx)
+        x: C with shape of (nens, nlag, nx)
     output:
         y with shape of (nens, ny)
     """
-    y_model = observation_model(x)
+    y_model = observation_model(x)  # (nens, ny)
     noise = torch.normal(mean=0.0, std=8.0, size=y_model.shape)
     return y_model + noise
 
 
-def run() -> (
-    Tuple[
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor,
-    ]
-):
-    x_true = torch.zeros((1, tt, nx))
+def run(
+    nlag: int,
+) -> Tuple[
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+]:
+    """
+    input:
+        nlag: 予報変数の時間次元 (leap-flogのため2時刻以上、固定ラグスムーザーの場合は長くする)
+    """
+    x_true = torch.zeros((1, nlag, nx))
     q_true = torch.normal(mean=0, std=1, size=(1,))
-    x_true_list = []
+    x_true_save = torch.zeros((nt + 1, nx))
     w_true_list = []
     y_list = []
 
-    x_free = torch.zeros((1, tt, nx))
-    x_free_list = []
+    x_free = torch.zeros((1, nlag, nx))
+    x_free_save = torch.zeros((nt + 1, nx))
     w_free_list = []
     q_free = torch.zeros((1,))  # no noise
 
     nens = 20
-    x_asim = torch.zeros((nens, tt, nx))
+    x_asim = torch.zeros((nens, nlag, nx))
     q_asim = torch.normal(mean=0, std=1, size=(nens,))
-    x_asim_list = []
+    x_asim_save = torch.zeros((nt + 1, nx))
     w_asim_list = []
 
     for step in range(nt + 1):
         if step % 15 == 0:
-            scheme = 1  # Euler
+            scheme = -1  # Euler
         else:
-            scheme = 0  # leap frog
+            scheme = -2  # leap frog
         w_true = forcing(step, q_true)
         x_true = forward(x_true, w_true, scheme)
         q_true = 0.8 * q_true + 0.2 * torch.normal(mean=0, std=1, size=(1,))
@@ -131,27 +134,31 @@ def run() -> (
         q_asim = 0.8 * q_asim + 0.2 * torch.normal(mean=0, std=1, size=(nens,))
 
         if step % assim_interval == 0 and step >= assim_start:
-            x_f = x_asim[:, 1, :]  # (nens, nx)
-            y = observation_true(x_true[:, 1, :])  # (nens, ny)
-            increment = EnKF(x_f, y)  # (nens, nx)
-            x_asim += increment.unsqueeze(1)  # (nens, tt, nx)
-            y_list.append(y[0, :])  # (ny)
+            y = observation_true(x_true)  # (nens, ny)
+            increment = EnKF(x_asim, y)  # (nens, nlag, nx)
+            x_asim += increment  # (nens, nlag, nx)
+            y_list.append(y[0, :])  # (1, ny) -> (ny)
 
+        if step - nlag < 0:
+            x_true_save[0:step, :] = x_true[0, nlag - step :, :]
+            x_free_save[0:step, :] = x_free[0, nlag - step :, :]
+            x_asim_save[0:step, :] = x_asim[:, nlag - step :, :].mean(dim=0)
+        else:
+            x_true_save[step - nlag : step, :] = x_true[0, :, :]
+            x_free_save[step - nlag : step, :] = x_free[0, :, :]
+            x_asim_save[step - nlag : step, :] = x_asim[:, :, :].mean(dim=0)
         if step % output_interval == 0:
-            x_true_list.append(x_true[0, 1, :])
             w_true_list.append(w_true[0, :])
-            x_free_list.append(x_free[0, 1, :])
             w_free_list.append(w_free[0, :])
-            x_asim_list.append(x_asim[:, 1, :])
             w_asim_list.append(w_asim)
 
     return (
-        torch.stack(x_true_list),  # (nt_out, nx)
+        x_true_save[::output_interval, :],  # (nt_out, nx)
         torch.stack(w_true_list),  # (nt_out, nx)
         torch.stack(y_list),  # (nt_out, ny)
-        torch.stack(x_free_list),  # (nt_out, nx)
+        x_free_save[::output_interval, :],  # (nt_out, nx)
         torch.stack(w_free_list),  # (nt_out, nx)
-        torch.stack(x_asim_list),  # (nt_out, nens, nx)
+        x_asim_save[::output_interval, :],  # (nt_out, nx)
         torch.stack(w_asim_list),  # (nt_out, nens, nx)
     )
 
@@ -160,29 +167,30 @@ def EnKF(x_f: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
     """
     Ensemble Kalman Filter
     input:
-        x_f: forecast with shape of (nens, nx)
+        x_f: forecast with shape of (nens, nlag, nx)
         y: observation with shape of (nens, ny)
     output
-        analysis increment with shape of (nens, nx)
+        analysis increment with shape of (nens, nlag, nx)
     """
     nens = x_f.shape[0]
-    x_mean = x_f.mean(dim=0).unsqueeze(0)  # (1, nx)
-    delta_X = x_f - x_mean  # (nens, nx)
+    x_mean = x_f.mean(dim=0).unsqueeze(0)  # (1, nlag, nx)
+    delta_X = x_f - x_mean  # (nens, nlag, nx)
     delta_Y = observation_model(delta_X)  # (nens, ny)
-    R = torch.diag(torch.full((ny,), 8.0**2))
-    R2 = torch.matmul(delta_Y.t(), delta_Y) + (nens - 1) * R
-    K = torch.matmul(
+    R = torch.diag(torch.full((ny,), 8.0**2))  # (ny, ny)
+    R2 = torch.matmul(delta_Y.t(), delta_Y) + (nens - 1) * R  # (ny, ny)
+    K = torch.einsum(
+        "ij,jkl->ikl",
         torch.matmul(
             torch.linalg.inv(R2),
             delta_Y.t(),
         ),
         delta_X,
-    )  # (ny, nx)
+    )  # (ny, nlag, nx)
     Hx = observation_model(x_f)  # (nens, ny)
     # Perturbed observations method
     y_eps = torch.normal(mean=0.0, std=8.0, size=(nens, ny))
     y_inov = y + y_eps - Hx  # (nens, ny)
-    increment = torch.matmul(y_inov, K)  # (nens, nx)
+    increment = torch.einsum("ij,jkl->ikl", y_inov, K)  # (nens, nlag, nx)
     return increment
 
 
