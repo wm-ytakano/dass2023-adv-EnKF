@@ -85,37 +85,28 @@ def observation_true(x: torch.Tensor) -> torch.Tensor:
     return y_model + noise
 
 
-def run(
-    nlag: int,
-) -> Tuple[
-    torch.Tensor,
-    torch.Tensor,
-    torch.Tensor,
-    torch.Tensor,
-    torch.Tensor,
-    torch.Tensor,
-    torch.Tensor,
-]:
+def run() -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     input:
         nlag: 予報変数の時間次元 (leap-flogのため2時刻以上、固定ラグスムーザーの場合は長くする)
     """
-    x_true = torch.zeros((1, nlag, nx))
+    x_true = torch.zeros((1, 2, nx))
     q_true = torch.normal(mean=0, std=1, size=(1,))
-    x_true_save = torch.zeros((nt + 1, nx))
-    w_true_list = []
-    y_list = []
+    x_true_save = torch.zeros((nt, nx))
 
-    x_free = torch.zeros((1, nlag, nx))
-    x_free_save = torch.zeros((nt + 1, nx))
-    w_free_list = []
+    x_free = torch.zeros((1, 2, nx))
     q_free = torch.zeros((1,))  # no noise
+    x_free_save = torch.zeros((nt, nx))
 
     nens = 20
-    x_asim = torch.zeros((nens, nlag, nx))
-    q_asim = torch.normal(mean=0, std=1, size=(nens,))
-    x_asim_save = torch.zeros((nt + 1, nx))
-    w_asim_list = []
+    x_filter = torch.zeros((nens, 2, nx))
+    q_filter = torch.normal(mean=0, std=1, size=(nens,))
+    x_filter_save = torch.zeros((nt, nx))
+
+    nlag = 300
+    x_smoother = torch.zeros((nens, nlag, nx))
+    q_smoother = torch.normal(mean=0, std=1, size=(nens,))
+    x_smoother_save = torch.zeros((nt, nx))
 
     for step in range(nt + 1):
         if step % 15 == 0:
@@ -129,37 +120,31 @@ def run(
         w_free = forcing(step, q_free)
         x_free = forward(x_free, w_free, scheme)
 
-        w_asim = forcing(step, q_asim)
-        x_asim = forward(x_asim, w_asim, scheme)
-        q_asim = 0.8 * q_asim + 0.2 * torch.normal(mean=0, std=1, size=(nens,))
+        w_filter = forcing(step, q_filter)
+        x_filter = forward(x_filter, w_filter, scheme)
+        q_filter = 0.8 * q_filter + 0.2 * torch.normal(mean=0, std=1, size=(nens,))
+
+        w_smoother = forcing(step, q_smoother)
+        x_smoother = forward(x_smoother, w_smoother, scheme)
+        q_smoother = 0.8 * q_smoother + 0.2 * torch.normal(mean=0, std=1, size=(nens,))
 
         if step % assim_interval == 0 and step >= assim_start:
-            y = observation_true(x_true)  # (nens, ny)
-            increment = EnKF(x_asim, y)  # (nens, nlag, nx)
-            x_asim += increment  # (nens, nlag, nx)
-            y_list.append(y[0, :])  # (1, ny) -> (ny)
+            y = observation_true(x_true)  # (1, ny)
+            x_filter += EnKF(x_filter, y)  # (nens, nlag, nx)
+            x_smoother += EnKF(x_smoother, y)  # (nens, nlag, nx)
 
-        if step - nlag < 0:
-            x_true_save[0:step, :] = x_true[0, nlag - step :, :]
-            x_free_save[0:step, :] = x_free[0, nlag - step :, :]
-            x_asim_save[0:step, :] = x_asim[:, nlag - step :, :].mean(dim=0)
-        else:
-            x_true_save[step - nlag : step, :] = x_true[0, :, :]
-            x_free_save[step - nlag : step, :] = x_free[0, :, :]
-            x_asim_save[step - nlag : step, :] = x_asim[:, :, :].mean(dim=0)
-        if step % output_interval == 0:
-            w_true_list.append(w_true[0, :])
-            w_free_list.append(w_free[0, :])
-            w_asim_list.append(w_asim)
+        if step - 2 >= 0:
+            x_true_save[step - 2 : step, :] = x_true[0, :, :]
+            x_free_save[step - 2 : step, :] = x_free[0, :, :]
+            x_filter_save[step - 2 : step, :] = x_filter[:, :, :].mean(dim=0)
+        if step - nlag >= 0:
+            x_smoother_save[step - nlag : step, :] = x_smoother[:, :, :].mean(dim=0)
 
     return (
         x_true_save[::output_interval, :],  # (nt_out, nx)
-        torch.stack(w_true_list),  # (nt_out, nx)
-        torch.stack(y_list),  # (nt_out, ny)
         x_free_save[::output_interval, :],  # (nt_out, nx)
-        torch.stack(w_free_list),  # (nt_out, nx)
-        x_asim_save[::output_interval, :],  # (nt_out, nx)
-        torch.stack(w_asim_list),  # (nt_out, nens, nx)
+        x_filter_save[::output_interval, :],  # (nt_out, nx)
+        x_smoother_save[::output_interval, :],  # (nt_out, nx)
     )
 
 
@@ -168,7 +153,7 @@ def EnKF(x_f: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
     Ensemble Kalman Filter
     input:
         x_f: forecast with shape of (nens, nlag, nx)
-        y: observation with shape of (nens, ny)
+        y: observation with shape of (1, ny)
     output
         analysis increment with shape of (nens, nlag, nx)
     """
@@ -199,6 +184,7 @@ def plot_xt(
     shade_levels: torch.Tensor,
     contour: torch.Tensor,
     contour_levels: torch.Tensor,
+    title: str,
 ) -> None:
     """
     plot data
@@ -206,7 +192,7 @@ def plot_xt(
         List of torch.Tensor with shape of (nt_out, nens, nx) (length of nt_out)
     """
     x_axis = torch.arange(0, dx * nx, dx)
-    t_axis = torch.arange(0, dt_out * nt_out, dt_out)
+    t_axis = torch.arange(dt_out, dt_out * nt_out, dt_out)
     fig, ax = plt.subplots()
     mappable = ax.contourf(
         x_axis,
@@ -243,4 +229,5 @@ def plot_xt(
     ax.set_ylabel("t [s]")
     ax.set_xlim([0, 400])
     ax.set_ylim([600, 0])
+    ax.set_title(title, loc="left")
     plt.show()
