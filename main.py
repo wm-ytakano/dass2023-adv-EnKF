@@ -85,7 +85,16 @@ def observation_true(x: torch.Tensor) -> torch.Tensor:
     return y_model + noise
 
 
-def run() -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+def run() -> (
+    Tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+    ]
+):
     """
     input:
         nlag: 予報変数の時間次元 (leap-flogのため2時刻以上、固定ラグスムーザーの場合は長くする)
@@ -102,11 +111,13 @@ def run() -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     x_filter = torch.zeros((nens, 2, nx))
     q_filter = torch.normal(mean=0, std=1, size=(nens,))
     x_filter_save = torch.zeros((nt, nx))
+    std_filter_save = torch.zeros((nt, nx))
 
     nlag = 300
     x_smoother = torch.zeros((nens, nlag, nx))
     q_smoother = torch.normal(mean=0, std=1, size=(nens,))
     x_smoother_save = torch.zeros((nt, nx))
+    std_smoother_save = torch.zeros((nt, nx))
 
     for step in range(nt + 1):
         if step % 15 == 0:
@@ -137,14 +148,18 @@ def run() -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
             x_true_save[step - 2 : step, :] = x_true[0, :, :]
             x_free_save[step - 2 : step, :] = x_free[0, :, :]
             x_filter_save[step - 2 : step, :] = x_filter[:, :, :].mean(dim=0)
+            std_filter_save[step - 2 : step, :] = x_filter[:, :, :].std(dim=0)
         if step - nlag >= 0:
             x_smoother_save[step - nlag : step, :] = x_smoother[:, :, :].mean(dim=0)
+            std_smoother_save[step - nlag : step, :] = x_smoother[:, :, :].std(dim=0)
 
     return (
         x_true_save[::output_interval, :],  # (nt_out, nx)
         x_free_save[::output_interval, :],  # (nt_out, nx)
         x_filter_save[::output_interval, :],  # (nt_out, nx)
+        std_filter_save[::output_interval, :],  # (nt_out, nx)
         x_smoother_save[::output_interval, :],  # (nt_out, nx)
+        std_smoother_save[::output_interval, :],  # (nt_out, nx)
     )
 
 
@@ -182,6 +197,7 @@ def EnKF(x_f: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
 def plot_xt(
     shade: torch.Tensor,
     shade_levels: torch.Tensor,
+    cmap: str,
     contour: torch.Tensor,
     contour_levels: torch.Tensor,
     title: str,
@@ -198,7 +214,7 @@ def plot_xt(
         x_axis,
         t_axis,
         shade,
-        cmap="RdBu_r",
+        cmap=cmap,
         levels=shade_levels,
         extend="both",
     )
